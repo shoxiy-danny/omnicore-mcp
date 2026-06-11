@@ -1,0 +1,16 @@
+{
+  "name": "omnicore-mcp",
+  "version": "1.0.0",
+  "description": "OmniCore MCP — 统一多模态入口（识图/定位/视频/语音/图片生成）",
+  "main": "./src/server.ts",
+  "scripts": {
+    "start": "bun run src/server.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.1",
+    "typescript": "^5.9.3"
+  }
+}
