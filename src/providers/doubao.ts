@@ -10,7 +10,7 @@
  * - image_describe（fallback）：图片内容描述
  */
 
-import { readFileSync } from 'fs'
+import { readFileSync, unlinkSync } from 'fs'
 
 const API_KEY = process.env.DOUBAO_API_KEY ?? ''
 const API_URL = 'https://ark.cn-beijing.volces.com/api/v3/responses'
@@ -94,4 +94,50 @@ export async function doubaoDescribeImage(imagePath: string, prompt?: string): P
     { type: 'input_image', image_url: fileToBase64(imagePath) },
     { type: 'input_text', text: p },
   ])
+}
+
+// ── 语音转文字（transcribe_audio）─────────────────────────────────────────
+
+export async function doubaoTranscribeAudio(filePath: string): Promise<string> {
+  const { execSync } = await import('child_process')
+  const ext = filePath.split('.').pop()?.toLowerCase() || ''
+  const wavPath = filePath.replace(/\.[^.]+$/, '') + '_tmp.wav'
+
+  // 转成 wav（16kHz 单声道）
+  try {
+    execSync(`ffmpeg -y -i "${filePath}" -ar 16000 -ac 1 "${wavPath}" 2>/dev/null`, { timeout: 30000 })
+  } catch (e: any) {
+    throw new Error(`ffmpeg 转换失败: ${e.message}`)
+  }
+
+  try {
+    const audioBuf = readFileSync(wavPath)
+    const b64 = audioBuf.toString('base64')
+
+    const resp = await fetch(API_URL, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: MODEL,
+        input: [{
+          role: 'user',
+          content: [
+            { type: 'input_audio', audio_url: `data:audio/wav;base64,${b64}` },
+            { type: 'input_text', text: '请将这段语音内容完整转写为文字，保留原话，用中文输出。' },
+          ],
+        }],
+      }),
+    })
+
+    const data = await resp.json() as any
+    if (data.error) throw new Error(`Doubao API 错误: ${data.error.message}`)
+
+    const text = data.output?.[1]?.content?.[0]?.text ?? ''
+    return text || '（未识别到语音内容）'
+  } finally {
+    try { unlinkSync(wavPath) } catch {}
+  }
 }
