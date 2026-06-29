@@ -14,7 +14,8 @@
 import { readFileSync, writeFileSync } from 'fs'
 import { join } from 'path'
 
-const API_KEY = process.env.MINIMAX_API_KEY ?? ''
+/** 运行时读取 MINIMAX_API_KEY（规避 ES module 的 import hoisting） */
+const getApiKey = () => process.env.MINIMAX_API_KEY ?? ''
 const API_HOST = 'https://api.minimaxi.com'
 
 // ── 海螺视频生成常量 ──────────────────────────────────────────────────────
@@ -58,7 +59,7 @@ export async function miniMaxDescribeImage(prompt: string, imageSource: string):
   const imageUrl = await resolveImageSource(imageSource)
   const resp = await fetch(`${API_HOST}/v1/coding_plan/vlm`, {
     method: 'POST',
-    headers: { Authorization: `Bearer ${API_KEY}`, 'Content-Type': 'application/json' },
+    headers: { Authorization: `Bearer ${getApiKey()}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({ prompt, image_url: imageUrl }),
   })
   if (!resp.ok) throw new Error(`MiniMax VLM 失败: ${resp.status}`)
@@ -86,7 +87,7 @@ export async function miniMaxGenerateImage(
   }
   const resp = await fetch(`${API_HOST}/v1/image_generation`, {
     method: 'POST',
-    headers: { Authorization: `Bearer ${API_KEY}`, 'Content-Type': 'application/json' },
+    headers: { Authorization: `Bearer ${getApiKey()}`, 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   })
   if (!resp.ok) throw new Error(`MiniMax 生图失败: ${resp.status}`)
@@ -103,7 +104,7 @@ export async function miniMaxGenerateImage(
 export async function miniMaxTts(text: string, voice: string): Promise<ArrayBuffer> {
   const resp = await fetch(`${API_HOST}/v1/t2a_v2`, {
     method: 'POST',
-    headers: { Authorization: `Bearer ${API_KEY}`, 'Content-Type': 'application/json' },
+    headers: { Authorization: `Bearer ${getApiKey()}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({ model: 'speech-01-hd', text, voice, audio_sample_rate: 24000 }),
   })
   if (!resp.ok) throw new Error(`MiniMax TTS 失败: ${resp.status}`)
@@ -155,7 +156,7 @@ export interface VideoGenResult {
 async function createVideoTask(body: Record<string, unknown>): Promise<string> {
   const resp = await fetch(`${API_HOST}/v1/video_generation`, {
     method: 'POST',
-    headers: { Authorization: `Bearer ${API_KEY}`, 'Content-Type': 'application/json' },
+    headers: { Authorization: `Bearer ${getApiKey()}`, 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   })
   if (!resp.ok) {
@@ -181,7 +182,7 @@ async function queryVideoTask(taskId: string): Promise<{
 }> {
   const resp = await fetch(`${API_HOST}/v1/query/video_generation?task_id=${encodeURIComponent(taskId)}`, {
     method: 'GET',
-    headers: { Authorization: `Bearer ${API_KEY}` },
+    headers: { Authorization: `Bearer ${getApiKey()}` },
   })
   if (!resp.ok) {
     const errText = await resp.text().catch(() => '')
@@ -201,7 +202,7 @@ async function queryVideoTask(taskId: string): Promise<{
 async function retrieveFileMeta(fileId: number): Promise<{ download_url: string; filename: string; bytes: number }> {
   const resp = await fetch(`${API_HOST}/v1/files/retrieve?file_id=${fileId}`, {
     method: 'GET',
-    headers: { Authorization: `Bearer ${API_KEY}` },
+    headers: { Authorization: `Bearer ${getApiKey()}` },
   })
   if (!resp.ok) {
     const errText = await resp.text().catch(() => '')

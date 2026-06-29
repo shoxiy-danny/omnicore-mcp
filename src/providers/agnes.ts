@@ -48,6 +48,60 @@ async function tryWithKeys<T>(fn: (key: string) => Promise<T>): Promise<T> {
   throw lastErr!
 }
 
+/** 检测 prompt 是否包含非 ASCII 字符（粗判非英文） */
+function needsEnglishTranslation(prompt: string): boolean {
+  for (let i = 0; i < prompt.length; i++) {
+    if (prompt.charCodeAt(i) > 127) return true
+  }
+  return false
+}
+
+/** 把非英文 prompt 翻译成英文。失败时回退原 prompt，不抛出。 */
+async function translatePromptToEnglish(prompt: string, key: string): Promise<string> {
+  const resp = await fetch(`${API_HOST}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json', connection: 'close' },
+    body: JSON.stringify({
+      model: 'agnes-2.0-flash',
+      messages: [
+        {
+          role: 'system',
+          content:
+            "Translate the user's image/video generation prompt into fluent English. " +
+            'Preserve all concrete visual details, style words, camera motion, lighting, ' +
+            'composition constraints, and negative instructions. Return only the English prompt.',
+        },
+        { role: 'user', content: prompt },
+      ],
+      temperature: 0,
+      max_tokens: 800,
+    }),
+  })
+  if (!resp.ok) {
+    process.stderr.write(`[omnicore] prompt translation HTTP ${resp.status}，回退原 prompt\n`)
+    return prompt
+  }
+  const data = (await resp.json()) as any
+  const translated: string | undefined = data?.choices?.[0]?.message?.content?.trim()
+  if (!translated) {
+    process.stderr.write(`[omnicore] prompt translation returned empty，回退原 prompt\n`)
+    return prompt
+  }
+  return translated
+}
+
+/** 带翻译的入口包装：非英文 prompt 走翻译，英文或 opt-out 直通 */
+async function maybeTranslate(opts: { prompt: string; no_translate?: boolean }, key: string): Promise<string> {
+  if (opts.no_translate || !needsEnglishTranslation(opts.prompt)) {
+    return opts.prompt
+  }
+  const translated = await translatePromptToEnglish(opts.prompt, key)
+  if (translated !== opts.prompt) {
+    process.stderr.write(`[omnicore] prompt 自动翻译:\n  原: ${opts.prompt}\n  新: ${translated}\n`)
+  }
+  return translated
+}
+
 // ── 尺寸映射 ──────────────────────────────────────────────────────────────
 
 const ASPECT_MAP: Record<string, string> = {
@@ -71,7 +125,7 @@ export async function agnesDescribeImage(prompt: string, imageSource: string): P
       : resolveImageSource(imageSource)
     const resp = await fetch(`${API_HOST}/v1/chat/completions`, {
       method: 'POST',
-      headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+      headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json', connection: 'close' },
       body: JSON.stringify({
         model: 'agnes-2.0-flash',
         messages: [{
@@ -113,24 +167,27 @@ export async function agnesGenerateImage(
   prompt: string,
   aspectRatio: string,
   subjectReference?: string,
+  noTranslate?: boolean,
 ): Promise<string> {
   const size = resolveSize(aspectRatio)
-  const body: Record<string, unknown> = {
-    model: 'agnes-image-2.1-flash',
-    prompt,
-    size,
-    extra_body: { response_format: 'url' },
-  }
-
-  // i2i：在 extra_body.image 中传入参考图
-  if (subjectReference) {
-    body.extra_body = { ...(body.extra_body as Record<string, unknown>), image: [resolveImageSource(subjectReference)] }
-  }
 
   return tryWithKeys(async (key) => {
+    const finalPrompt = await maybeTranslate({ prompt, no_translate: noTranslate }, key)
+    const body: Record<string, unknown> = {
+      model: 'agnes-image-2.1-flash',
+      prompt: finalPrompt,
+      size,
+      extra_body: { response_format: 'url' },
+    }
+
+    // i2i：在 extra_body.image 中传入参考图
+    if (subjectReference) {
+      body.extra_body = { ...(body.extra_body as Record<string, unknown>), image: [resolveImageSource(subjectReference)] }
+    }
+
     const resp = await fetch(`${API_HOST}/v1/images/generations`, {
       method: 'POST',
-      headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+      headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json', connection: 'close' },
       body: JSON.stringify(body),
     })
     if (!resp.ok) {
@@ -190,6 +247,8 @@ export interface AgnesVideoGenOptions {
   timeout_ms?: number
   /** 输出目录 */
   output_dir?: string
+  /** 关闭非英文 prompt 自动翻译（调用方已自行翻译时使用） */
+  no_translate?: boolean
 }
 
 export interface AgnesVideoGenResult {
@@ -210,7 +269,7 @@ const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
 async function createVideoTask(key: string, body: Record<string, unknown>): Promise<string> {
   const resp = await fetch(`${API_HOST}/v1/videos`, {
     method: 'POST',
-    headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+    headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json', connection: 'close' },
     body: JSON.stringify(body),
   })
   if (!resp.ok) {
@@ -232,7 +291,7 @@ async function queryVideoTask(key: string, videoId: string): Promise<{
 }> {
   const resp = await fetch(`${API_HOST}/agnesapi?video_id=${encodeURIComponent(videoId)}`, {
     method: 'GET',
-    headers: { Authorization: `Bearer ${key}` },
+    headers: { Authorization: `Bearer ${key}`, connection: 'close' },
   })
   if (!resp.ok) {
     const errText = await resp.text().catch(() => '')
@@ -247,7 +306,53 @@ async function queryVideoTask(key: string, videoId: string): Promise<{
   }
 }
 
-/** 主流程：创建 → 轮询 → 下载（付费 → 免费降级） */
+/** 上传本地图片到 Agnes 图床（通过 i2i 生成获得托管 URL），用于 I2V 参考图。
+ *  缓存 URL 到 .url 文件，避免重复上传。 */
+async function uploadImageToHostedUrl(imagePath: string, key: string): Promise<string | null> {
+  // 读取缓存
+  const cacheFile = imagePath + '.url'
+  try {
+    const cached = readFileSync(cacheFile, 'utf8').trim()
+    if (cached) {
+      process.stderr.write(`[omnicore] Using cached image URL: ${cached.slice(0, 80)}...\n`)
+      return cached
+    }
+  } catch {}
+
+  const dataUri = resolveImageSource(imagePath)
+  const payload = {
+    model: 'agnes-image-2.1-flash',
+    prompt: 'Keep the image exactly as it is',
+    n: 1,
+    size: '1024x1024',
+    extra_body: { response_format: 'url', image: dataUri },
+  }
+
+  try {
+    const resp = await fetch(`${API_HOST}/v1/images/generations`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json', connection: 'close' },
+      body: JSON.stringify(payload),
+    })
+    if (!resp.ok) {
+      const errText = await resp.text().catch(() => '')
+      process.stderr.write(`[omnicore] Image upload HTTP ${resp.status}, will use base64: ${errText.slice(0, 150)}\n`)
+      return null
+    }
+    const result = await resp.json() as any
+    const url = result.data?.[0]?.url
+    if (url) {
+      try { writeFileSync(cacheFile, url, 'utf8') } catch {}
+      process.stderr.write(`[omnicore] Image uploaded → hosted URL: ${url.slice(0, 80)}...\n`)
+      return url
+    }
+  } catch (e: any) {
+    process.stderr.write(`[omnicore] Image upload error: ${e.message?.slice(0, 150)}\n`)
+  }
+  return null
+}
+
+/** 主流程：创建 → 轮询 → 下载（Agnes 免费 → MiniMax 付费降级） */
 export async function agnesVideoGen(opts: AgnesVideoGenOptions): Promise<AgnesVideoGenResult> {
   return tryWithKeys(async (key) => {
     const startedAt = Date.now()
@@ -260,9 +365,11 @@ export async function agnesVideoGen(opts: AgnesVideoGenOptions): Promise<AgnesVi
     const { width, height } = resolveResolution(resolution)
     const numFrames = computeNumFrames(duration)
 
+    const finalPrompt = await maybeTranslate({ prompt: opts.prompt, no_translate: opts.no_translate }, key)
+
     const body: Record<string, unknown> = {
       model: 'agnes-video-v2.0',
-      prompt: opts.prompt,
+      prompt: finalPrompt,
       width,
       height,
       num_frames: numFrames,
@@ -270,7 +377,9 @@ export async function agnesVideoGen(opts: AgnesVideoGenOptions): Promise<AgnesVi
     }
 
     if (opts.first_frame_image) {
-      body.image = resolveImageSource(opts.first_frame_image)
+      // SAM 的做法：用 first_frame_image 字段，直接传 base64 data URI
+      // （不是 image 字段！image 字段只接受 URL，first_frame_image 接受 base64）
+      body.first_frame_image = resolveImageSource(opts.first_frame_image)
     }
     if (opts.negative_prompt) {
       body.negative_prompt = opts.negative_prompt
