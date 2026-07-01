@@ -128,14 +128,15 @@ const tools = [
   },
   {
     name: 'video_gen',
-    description: '视频生成。优先走 Agnes（免费），失败自动切 MiniMax Hailuo。支持文生视频（T2V）和图生视频（I2V）。Agnes 约 1-3 分钟，最长 15s（360帧×24fps），下载到本地 output 目录。风格和运镜通过 prompt 文字控制（在 prompt 中加入风格描述如 "cinematic/写实/电影级" 和运镜描述）。【提示】非英文 prompt 会被自动翻译为英文（Agnes 路径），调用方如已自行翻译可设 no_translate=true 关闭。',
+    description: '视频生成。优先走 Agnes（免费），失败自动切 MiniMax Hailuo。支持文生视频（T2V）、单图图生视频（I2V）、首尾图关键帧模式（keyframes）。Agnes 约 1-3 分钟，最长 18s（441帧×24fps），下载到本地 output 目录。风格和运镜通过 prompt 文字控制（在 prompt 中加入风格描述如 "cinematic/写实/电影级" 和运镜描述）。【提示】非英文 prompt 会被自动翻译为英文（Agnes 路径），调用方如已自行翻译可设 no_translate=true 关闭。',
     inputSchema: {
       type: 'object',
       properties: {
         prompt: { type: 'string', description: '视频文本描述，最大 2000 字符。非英文会自动翻译为英文（仅 Agnes 路径生效）。【风格控制】在 prompt 中加入风格关键词：cinematic/写实/电影级/realistic/动漫/anime 等。【运镜控制】在 prompt 中描述镜头运动，如 "camera slowly pushes in"、"镜头缓缓左移" 或使用 [左移]/[右移]/[左摇]/[右摇]/[推进]/[拉远]/[上升]/[下降]/[上摇]/[下摇]/[变焦推近]/[变焦拉远]/[晃动]/[跟随]/[固定] 指令，可组合如 [左摇,上升] 或顺序使用。示例："[特写] 一个女孩在樱花树下微笑，电影写实风格，柔和自然光，[左移] 镜头缓缓左移捕捉她的侧脸，[推进] 慢慢推进到特写。"' },
-        first_frame_image: { type: 'string', description: '图生视频必填：首帧图片。本地文件绝对路径、HTTP(S) URL，或 data:image/...;base64,... Data URL' },
+        first_frame_image: { type: 'string', description: '图生视频首帧图片。本地文件绝对路径、HTTP(S) URL，或 data:image/...;base64,... Data URL。设置 last_frame_image 时进入关键帧模式' },
+        last_frame_image: { type: 'string', description: '关键帧模式尾帧图片。本地文件绝对路径、HTTP(S) URL，或 data:image/...;base64,... Data URL。需配合 first_frame_image 一起使用' },
         model: { type: 'string', description: '模型名（Agnes 固定 agnes-video-v2.0）。默认 MiniMax-Hailuo-2.3。可选：MiniMax-Hailuo-2.3 / MiniMax-Hailuo-2.3-Fast（I2V 快速版）/ MiniMax-Hailuo-02 / T2V-01-Director / T2V-01 / I2V-01-Director / I2V-01-live / I2V-01', default: 'MiniMax-Hailuo-2.3' },
-        duration: { type: 'number', description: '视频时长（秒），默认 6。Agnes 支持 3~15 秒（24FPS 自动取最近合法帧数），MiniMax 仅支持 6 或 10', default: 6 },
+        duration: { type: 'number', description: '视频时长（秒），默认 6。Agnes 支持 3~18 秒（24FPS 自动取最近合法帧数 8n+1），MiniMax 仅支持 6 或 10', default: 6 },
         resolution: { type: 'string', description: '分辨率。Agnes 支持 720P/768P/1080P，默认 768P。MiniMax Hailuo 2.3 768P 可选 6 或 10，1080P 仅 6', default: '768P' },
         aigc_watermark: { type: 'boolean', description: '是否在视频上加 AIGC 水印，默认 false', default: false },
         negative_prompt: { type: 'string', description: 'Agnes 专用：负向提示词，描述要避免的内容（如 "模糊、变形、低质量"）' },
@@ -372,6 +373,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
       case 'video_gen': {
         const prompt = args.prompt as string
         const firstFrameImage = args.first_frame_image as string | undefined
+        const lastFrameImage = args.last_frame_image as string | undefined
         const model = args.model as string | undefined
         const duration = typeof args.duration === 'number' ? args.duration : 6
         const resolution = (args.resolution as string) || '768P'
@@ -409,6 +411,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
             result = await agnesVideoGen({
               prompt,
               first_frame_image: firstFrameImage,
+              last_frame_image: lastFrameImage,
               duration,
               resolution,
               negative_prompt: negativePrompt,
@@ -431,7 +434,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
           }
         }
 
-        const mode = firstFrameImage ? '图生视频 (I2V)' : '文生视频 (T2V)'
+        const mode = lastFrameImage ? '关键帧 (keyframes)' : firstFrameImage ? '图生视频 (I2V)' : '文生视频 (T2V)'
         const elapsedSec = (result.elapsed_ms / 1000).toFixed(1)
         const lines = [
           `视频生成成功 (${usedProvider}, ${mode})`,

@@ -13,6 +13,7 @@
 
 import { readFileSync, writeFileSync } from 'fs'
 import { join } from 'path'
+import { safeResolvePath, safeCheckFileSize, isSafeUrl } from '../utils/security.js'
 
 /** 运行时读取 MINIMAX_API_KEY（规避 ES module 的 import hoisting） */
 const getApiKey = () => process.env.MINIMAX_API_KEY ?? ''
@@ -37,17 +38,23 @@ export async function resolveImageSource(source: string): Promise<string> {
   let buf: Buffer
   let ext: string
   if (source.startsWith('http://') || source.startsWith('https://')) {
+    // SSRF 防护：拒绝内网地址
+    if (!isSafeUrl(source)) throw new Error(`URL 被安全策略拒绝: ${source}`)
     // 下载 URL → base64
-    const resp = await fetch(source)
+    const resp = await fetch(source, { signal: AbortSignal.timeout(30_000) })
     if (!resp.ok) throw new Error(`无法下载图片: ${resp.status}`)
     const contentType = resp.headers.get('content-type') || 'image/png'
     const typeMap: Record<string, string> = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp', 'image/gif': 'gif' }
     ext = typeMap[contentType] || 'png'
     buf = Buffer.from(await resp.arrayBuffer())
+    // 下载内容 50MB 上限
+    if (buf.length > 50 * 1024 * 1024) throw new Error('下载图片过大 (>50MB)')
   } else {
-    // 本地文件
-    buf = readFileSync(source)
-    ext = source.split('.').pop()?.toLowerCase() || 'png'
+    // 本地文件 — 路径校验
+    const safePath = safeResolvePath(source)
+    safeCheckFileSize(safePath)
+    buf = readFileSync(safePath)
+    ext = safePath.split('.').pop()?.toLowerCase() || 'png'
   }
   const mime: Record<string, string> = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp', gif: 'image/gif' }
   return `data:${mime[ext] || 'image/png'};base64,${buf.toString('base64')}`

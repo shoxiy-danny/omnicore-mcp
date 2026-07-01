@@ -1,5 +1,7 @@
 .env
+.env.bak*
 node_modules/
 output/
+server
 .DS_Store
 *.log

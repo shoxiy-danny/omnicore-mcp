@@ -6,11 +6,11 @@
  * 工具：
  * - stepfunGenerateImage — 文生图 + 图生图（step-image-edit-2）
  *
- * Key 来源：~/.claude/providers.json（复用 CC 的 StepFun 配置）
+ * Key 来源：process.env.STEPFUN_API_KEY（.env 统一管理）
  */
 
-import { readFileSync, existsSync } from 'fs'
-import { join } from 'path'
+import { readFileSync } from 'fs'
+import { safeResolvePath, safeCheckFileSize } from '../utils/security.js'
 
 const STEPFUN_HOST = 'https://api.stepfun.com'
 const STEPFUN_PLAN_PREFIX = '/step_plan/v1'
@@ -19,16 +19,6 @@ const MODEL = 'step-image-edit-2'
 // ── Key 读取 ────────────────────────────────────────────────────────────────
 
 function getStepFunKey(): string {
-  // 优先从 CC 的 providers.json 读取
-  const providersPath = join(process.env.HOME!, '.claude', 'providers.json')
-  if (existsSync(providersPath)) {
-    try {
-      const data = JSON.parse(readFileSync(providersPath, 'utf8'))
-      const stepfun = data?.stepfun?.authToken
-      if (stepfun) return stepfun
-    } catch {}
-  }
-  // fallback：环境变量
   return process.env.STEPFUN_API_KEY ?? ''
 }
 
@@ -51,8 +41,10 @@ function resolveSize(aspectRatio: string): string {
 function resolveImageSource(source: string): string {
   if (source.startsWith('data:')) return source
   if (source.startsWith('http://') || source.startsWith('https://')) return source
-  const buf = readFileSync(source)
-  const ext = source.split('.').pop()?.toLowerCase() || 'png'
+  const safePath = safeResolvePath(source)
+  safeCheckFileSize(safePath)
+  const buf = readFileSync(safePath)
+  const ext = safePath.split('.').pop()?.toLowerCase() || 'png'
   const mime: Record<string, string> = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp', gif: 'image/gif' }
   return `data:${mime[ext] || 'image/png'};base64,${buf.toString('base64')}`
 }
@@ -65,14 +57,14 @@ export async function stepfunGenerateImage(
   subjectReference?: string,
 ): Promise<string> {
   const key = getStepFunKey()
-  if (!key) throw new Error('未找到 StepFun API Key（~/.claude/providers.json 或 STEPFUN_API_KEY 环境变量）')
+  if (!key) throw new Error('未找到 StepFun API Key（请在 .env 配置 STEPFUN_API_KEY）')
 
   const size = resolveSize(aspectRatio)
 
   // 有参考图 → 图生图（edits 接口，multipart form）
   if (subjectReference) {
     const form = new FormData()
-    form.append('image', readFileSync(subjectReference), 'input.png')
+    form.append('image', readFileSync(safeResolvePath(subjectReference)), 'input.png')
     form.append('model', MODEL)
     form.append('prompt', prompt)
     form.append('size', size)

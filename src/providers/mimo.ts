@@ -11,6 +11,7 @@
  */
 
 import { readFileSync } from 'fs'
+import { safeResolvePath, safeCheckFileSize, isSafeUrl } from '../utils/security.js'
 
 const MIMO_API_KEY = process.env.MIMO_API_KEY ?? ''
 const MIMO_API_HOST = process.env.MIMO_API_HOST ?? 'https://token-plan-cn.xiaomimimo.com'
@@ -39,16 +40,21 @@ export async function mimoTts(text: string, voice: string, format: string): Prom
 /** 将本地图片转为 base64 data URI */
 function resolveImageSource(source: string): string {
   if (source.startsWith('data:')) return source
-  if (source.startsWith('http://') || source.startsWith('https://')) return source
-  const buf = readFileSync(source)
-  const ext = source.split('.').pop()?.toLowerCase() || 'png'
+  if (source.startsWith('http://') || source.startsWith('https://')) {
+    if (!isSafeUrl(source)) throw new Error(`URL 被安全策略拒绝: ${source}`)
+    return source
+  }
+  const safePath = safeResolvePath(source)
+  safeCheckFileSize(safePath)
+  const buf = readFileSync(safePath)
+  const ext = safePath.split('.').pop()?.toLowerCase() || 'png'
   const mime: Record<string, string> = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp', gif: 'image/gif' }
   return `data:${mime[ext] || 'image/png'};base64,${buf.toString('base64')}`
 }
 
 export async function mimoDescribeImage(prompt: string, imageSource: string): Promise<string> {
   const url = imageSource.startsWith('http://') || imageSource.startsWith('https://')
-    ? imageSource
+    ? (isSafeUrl(imageSource) ? imageSource : (() => { throw new Error(`URL 被安全策略拒绝: ${imageSource}`) })())
     : resolveImageSource(imageSource)
 
   const resp = await fetch(`${MIMO_API_HOST}/v1/chat/completions`, {

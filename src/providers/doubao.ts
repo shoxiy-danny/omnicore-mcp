@@ -11,6 +11,7 @@
  */
 
 import { readFileSync, unlinkSync } from 'fs'
+import { safeResolvePath, safeCheckFileSize, shellQuote } from '../utils/security.js'
 
 const API_KEY = process.env.DOUBAO_API_KEY ?? ''
 const API_URL = 'https://ark.cn-beijing.volces.com/api/v3/responses'
@@ -56,8 +57,10 @@ async function callDoubao(content: ContentBlock[], extra: Record<string, unknown
 }
 
 function fileToBase64(path: string): string {
-  const buf = readFileSync(path)
-  const ext = path.split('.').pop()?.toLowerCase() || 'bin'
+  const safePath = safeResolvePath(path)
+  safeCheckFileSize(safePath, 100 * 1024 * 1024) // 视频/图片 100MB 上限
+  const buf = readFileSync(safePath)
+  const ext = safePath.split('.').pop()?.toLowerCase() || 'bin'
   const mime: Record<string, string> = {
     png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp',
     mp4: 'video/mp4', mov: 'video/quicktime', qt: 'video/quicktime',
@@ -100,12 +103,14 @@ export async function doubaoDescribeImage(imagePath: string, prompt?: string): P
 
 export async function doubaoTranscribeAudio(filePath: string): Promise<string> {
   const { execSync } = await import('child_process')
-  const ext = filePath.split('.').pop()?.toLowerCase() || ''
-  const wavPath = filePath.replace(/\.[^.]+$/, '') + '_tmp.wav'
+  const safePath = safeResolvePath(filePath)
+  safeCheckFileSize(safePath, 50 * 1024 * 1024) // 音频 50MB 上限
+  const ext = safePath.split('.').pop()?.toLowerCase() || ''
+  const wavPath = safePath.replace(/\.[^.]+$/, '') + '_tmp.wav'
 
-  // 转成 wav（16kHz 单声道）
+  // 转成 wav（16kHz 单声道）— shellQuote 防命令注入
   try {
-    execSync(`ffmpeg -y -i "${filePath}" -ar 16000 -ac 1 "${wavPath}" 2>/dev/null`, { timeout: 30000 })
+    execSync(`ffmpeg -y -i ${shellQuote(safePath)} -ar 16000 -ac 1 ${shellQuote(wavPath)} 2>/dev/null`, { timeout: 30000 })
   } catch (e: any) {
     throw new Error(`ffmpeg 转换失败: ${e.message}`)
   }

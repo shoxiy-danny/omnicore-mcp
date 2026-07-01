@@ -11,6 +11,7 @@
 
 import { readFileSync, writeFileSync } from 'fs'
 import { join } from 'path'
+import { safeResolvePath, safeCheckFileSize, isSafeUrl } from '../utils/security.js'
 
 const API_HOST = 'https://apihub.agnes-ai.com'
 
@@ -153,10 +154,15 @@ export async function agnesDescribeImage(prompt: string, imageSource: string): P
 
 function resolveImageSource(source: string): string {
   if (source.startsWith('data:')) return source
-  if (source.startsWith('http://') || source.startsWith('https://')) return source
-  // 本地文件 → base64
-  const buf = readFileSync(source)
-  const ext = source.split('.').pop()?.toLowerCase() || 'png'
+  if (source.startsWith('http://') || source.startsWith('https://')) {
+    if (!isSafeUrl(source)) throw new Error(`URL 被安全策略拒绝: ${source}`)
+    return source
+  }
+  // 本地文件 → 校验 + base64
+  const safePath = safeResolvePath(source)
+  safeCheckFileSize(safePath)
+  const buf = readFileSync(safePath)
+  const ext = safePath.split('.').pop()?.toLowerCase() || 'png'
   const mime: Record<string, string> = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp', gif: 'image/gif' }
   return `data:${mime[ext] || 'image/png'};base64,${buf.toString('base64')}`
 }
@@ -203,13 +209,13 @@ export async function agnesGenerateImage(
 
 // ── 视频生成 ──────────────────────────────────────────────────────────────
 
-/** 帧数计算：duration 秒 × 24fps，取最近的有效值（8n+1，≤ 360，即 ≤15s） */
+/** 帧数计算：duration 秒 × 24fps，取最近的有效值（8n+1，≤ 441，即 ≤18s） */
 function computeNumFrames(duration: number): number {
   const target = Math.round(duration * 24)
   const candidates: number[] = []
   for (let n = 1; ; n++) {
     const frames = 8 * n + 1
-    if (frames > 360) break  // 24FPS ≤15s
+    if (frames > 441) break  // 24FPS ≤18s
     candidates.push(frames)
   }
   // 找最接近 target 的有效帧数
@@ -233,6 +239,8 @@ export interface AgnesVideoGenOptions {
   prompt: string
   /** 图生视频首帧图片（本地路径或 URL） */
   first_frame_image?: string
+  /** 关键帧模式：尾帧图片（本地路径或 URL）。设置后启用 keyframes 模式 */
+  last_frame_image?: string
   /** 视频时长（秒），默认 6 */
   duration?: number
   /** 分辨率，默认 768P */
@@ -377,9 +385,27 @@ export async function agnesVideoGen(opts: AgnesVideoGenOptions): Promise<AgnesVi
     }
 
     if (opts.first_frame_image) {
-      // SAM 的做法：用 first_frame_image 字段，直接传 base64 data URI
-      // （不是 image 字段！image 字段只接受 URL，first_frame_image 接受 base64）
-      body.first_frame_image = resolveImageSource(opts.first_frame_image)
+      // 按官方文档 V2.0：单图 I2V 用 image 字段（传 URL）。
+      // 本地文件先上传到 Agnes 图床获得托管 URL；URL 直传。上传失败回退 base64 data URI。
+      const imgPath = opts.first_frame_image
+      const isLocal = !imgPath.startsWith('http://') && !imgPath.startsWith('https://') && !imgPath.startsWith('data:')
+      const hostedUrl = isLocal ? await uploadImageToHostedUrl(imgPath, key) : null
+      body.image = hostedUrl || resolveImageSource(imgPath)
+    }
+    if (opts.last_frame_image) {
+      // 关键帧模式：extra_body.image = [首帧URL, 尾帧URL]，extra_body.mode = "keyframes"
+      const firstPath = opts.first_frame_image
+      const firstIsLocal = firstPath && !firstPath.startsWith('http://') && !firstPath.startsWith('https://') && !firstPath.startsWith('data:')
+      const firstHosted = firstIsLocal ? await uploadImageToHostedUrl(firstPath!, key) : null
+      const firstUrl = firstHosted || (firstPath ? resolveImageSource(firstPath) : null)
+      if (!firstUrl) {
+        throw new Error('关键帧模式需要 first_frame_image')
+      }
+      const lastPath = opts.last_frame_image
+      const lastIsLocal = !lastPath.startsWith('http://') && !lastPath.startsWith('https://') && !lastPath.startsWith('data:')
+      const lastHosted = lastIsLocal ? await uploadImageToHostedUrl(lastPath, key) : null
+      const lastUrl = lastHosted || resolveImageSource(lastPath)
+      body.extra_body = { image: [firstUrl, lastUrl], mode: 'keyframes' }
     }
     if (opts.negative_prompt) {
       body.negative_prompt = opts.negative_prompt

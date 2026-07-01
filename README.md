@@ -23,7 +23,7 @@
 ## 依赖
 
 - [Bun](https://bun.sh/) — 运行时（`package.json` 用 `bun run`）
-- [ffmpeg](https://ffmpeg.org/) — 语音转写和音频转码必需，需在系统 PATH 中
+- [ffmpeg](https://ffmpeg.org/) — 语音转写音频转码必需（opus→wav），需在系统 PATH 中
 
 ```bash
 # 安装 Bun
@@ -113,8 +113,18 @@ src/
 │   ├── minimax.ts         # MiniMax（全功能兜底）
 │   └── stepfun.ts         # StepFun（生图 fallback）
 └── utils/
-    └── ffmpeg.ts          # 音频转码工具
+    ├── ffmpeg.ts          # 音频转码（opus→wav）
+    └── security.ts        # 路径校验 / SSRF 防护 / 命令注入防护
 ```
+
+## 安全
+
+所有用户输入的文件路径和 URL 都经过 `src/utils/security.ts` 校验：
+
+- **路径穿越防护**：拒绝 `/etc /dev /proc /sys /root /var/log` 及 `.ssh .env id_rsa providers.json .aws .gnupg` 等敏感路径
+- **SSRF 防护**：拒绝 localhost / 内网 IP（10.x / 172.16-31.x / 192.168.x / 169.254.x）/ `.local .internal` 域名
+- **命令注入防护**：ffmpeg 命令拼接用 `shellQuote` 单引号转义
+- **文件大小上限**：图片 50MB / 视频 100MB / 音频 50MB，防撑爆内存
 
 ## License
 
