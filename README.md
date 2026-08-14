@@ -1,6 +1,6 @@
 # OmniCore MCP
 
-统一多模态入口 MCP Server —— 把多家 AI 模型（识图 / 生图 / 视频 / 语音）聚合成一个 MCP 接口，带自动兜底链。
+统一多模态入口 MCP Server —— 把多家 AI 模型（识图 / 生图 / 视频 / 语音）聚合成一个 MCP 接口。image_gen 和 video_gen 默认走 Agnes，失败不自动降级（需显式指定 provider 切换）。
 
 ## 特性
 
@@ -10,15 +10,15 @@
 
 ## 工具列表
 
-| 工具 | 主路径 | 兜底链 |
-|------|--------|--------|
+| 工具 | 主路径 | 降级方式 |
+|------|--------|----------|
 | `image_describe` | Doubao | MiMo → Agnes → MiniMax |
 | `image_locate` | Doubao | — |
 | `video_analyze` | Doubao | — |
 | `voice_gen` | MiMo | MiniMax |
 | `transcribe_audio` | Doubao | — |
-| `image_gen` | Agnes | StepFun → MiniMax |
-| `video_gen` | Agnes | MiniMax Hailuo |
+| `image_gen` | Agnes | 显式指定 `provider` 切换 stepfun/minimax/sensenova/grok |
+| `video_gen` | Agnes | 显式指定 `provider` 切换 minimax/grok |
 
 ## 依赖
 
@@ -60,8 +60,9 @@ cp .env.example .env
 | MiMo (小米) | TTS / 识图 | https://www.xiaomimimo.com/ |
 | MiniMax | 全功能兜底（付费） | https://platform.minimaxi.com/ |
 | StepFun | 生图 fallback（免费额度） | https://www.stepfun.com/ |
+| Grok (xAI) | 生图 / 视频（经 aiproxy，套餐 API 用量） | 需 AIPROXY_BASE_URL + AIPROXY_API_KEY |
 
-**最低配置**：只配 `AGNES_API_KEY` + `DOUBAO_API_KEY` 即可使用大部分工具。其他 key 按需配置，缺失的 provider 会在兜底链中自动跳过。
+**最低配置**：只配 `AGNES_API_KEY` + `DOUBAO_API_KEY` 即可使用大部分工具。Grok 需额外配置 `AIPROXY_BASE_URL` + `AIPROXY_API_KEY`。其他 key 按需配置，缺失的 provider 会在兜底链中自动跳过。
 
 ## 接入 MCP 客户端
 
@@ -99,6 +100,8 @@ claude mcp add omnicore -- bun /absolute/path/to/omnicore-mcp/src/server.ts
 帮我把这段话转成语音：你好世界
 帮我生成一张 16:9 的日落图
 分析这个视频的内容：/path/to/video.mp4
+用 Grok 生一张图（provider=grok）
+用 Grok 生一段视频（provider=grok, duration=6）
 ```
 
 ## 项目结构
@@ -109,11 +112,13 @@ src/
 ├── providers/
 │   ├── agnes.ts           # Agnes AI（生图 / 视频 / 识图）
 │   ├── doubao.ts          # Doubao（识图 / 视频 / 语音转写）
+│   ├── grok.ts            # Grok xAI Imagine（经 aiproxy，生图 / 视频）
 │   ├── mimo.ts            # MiMo（TTS / 识图）
 │   ├── minimax.ts         # MiniMax（全功能兜底）
+│   ├── sensenova.ts       # SenseNova U1 Fast（信息图生图）
 │   └── stepfun.ts         # StepFun（生图 fallback）
 └── utils/
-    ├── ffmpeg.ts          # 音频转码（opus→wav）
+    ├── ffmpeg.ts          # 音频转码 + 视频 remux（飞书兼容）
     └── security.ts        # 路径校验 / SSRF 防护 / 命令注入防护
 ```
 

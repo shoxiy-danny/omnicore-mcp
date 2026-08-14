@@ -5,7 +5,7 @@
  * 鉴权：api-key header
  *
  * 工具：
- * - TTS：mimo-v2.5-tts
+ * - TTS：mimo-v2.5-tts / mimo-v2.5-tts-voicedesign
  * - 图片理解（fallback）：mimo-v2-omni（多模态）
  * - 搜索：mimo-v2.5-pro（需 webSearchEnabled=true）
  */
@@ -18,14 +18,43 @@ const MIMO_API_HOST = process.env.MIMO_API_HOST ?? 'https://token-plan-cn.xiaomi
 
 // ── TTS ──────────────────────────────────────────────────────────────────────
 
-export async function mimoTts(text: string, voice: string, format: string): Promise<ArrayBuffer> {
+/** MiMo TTS 可用模型（按量付费免费档） */
+export const MIMO_TTS_MODELS = {
+  tts: 'mimo-v2.5-tts',
+  voicedesign: 'mimo-v2.5-tts-voicedesign',
+} as const
+
+export type MimoTtsModel = keyof typeof MIMO_TTS_MODELS
+
+/**
+ * MiMo TTS
+ * @param text 待合成文本
+ * @param voice 预置音色名（tts）/ 自然语言音色描述（voicedesign）
+ * @param format 音频格式（wav/mp3/pcm16）
+ * @param model 模型：'tts'（默认，预置音色）/ 'voicedesign'（自然语言描述音色）
+ */
+export async function mimoTts(
+  text: string,
+  voice: string,
+  format: string,
+  model: MimoTtsModel = 'tts',
+): Promise<ArrayBuffer> {
+  const modelId = MIMO_TTS_MODELS[model] ?? MIMO_TTS_MODELS.tts
+  // voicedesign 模型：voice 描述作为 user 消息，audio 不传 voice
+  // tts 模型：voice 放在 audio.voice，messages 只有 assistant 文本
+  const messages = model === 'voicedesign'
+    ? [{ role: 'user', content: voice }, { role: 'assistant', content: text }]
+    : [{ role: 'assistant', content: text }]
+  const audio: Record<string, unknown> = { format }
+  if (model !== 'voicedesign') audio.voice = voice
+
   const resp = await fetch(`${MIMO_API_HOST}/v1/chat/completions`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'api-key': MIMO_API_KEY },
     body: JSON.stringify({
-      model: 'mimo-v2.5-tts',
-      messages: [{ role: 'assistant', content: text }],
-      audio: { voice, format },
+      model: modelId,
+      messages,
+      audio,
     }),
   })
   if (!resp.ok) throw new Error(`MiMo TTS 失败: ${resp.status}`)

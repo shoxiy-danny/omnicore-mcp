@@ -26,10 +26,10 @@ function getStepFunKey(): string {
 
 const ASPECT_MAP: Record<string, string> = {
   '1:1':  '1024x1024',
-  '3:4':  '768x1024',
-  '4:3':  '1024x768',
-  '16:9': '1280x720',
-  '9:16': '720x1280',
+  '3:4':  '896x1184',
+  '4:3':  '1184x896',
+  '16:9': '1360x768',
+  '9:16': '768x1360',
 }
 
 function resolveSize(aspectRatio: string): string {
