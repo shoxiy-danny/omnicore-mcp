@@ -2,6 +2,7 @@
 .env.bak*
 node_modules/
 output/
+logs/
 server
 .DS_Store
 *.log

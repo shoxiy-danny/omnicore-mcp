@@ -1,6 +1,18 @@
 import { execSync } from 'child_process'
 import { unlinkSync, renameSync, existsSync } from 'fs'
+import { homedir } from 'os'
+import { join } from 'path'
 import { shellQuote, safeResolvePath } from './security.js'
+
+/**
+ * ffmpeg 绝对路径。
+ * 注意：bun 的 execSync 使用进程启动时的环境快照，运行时改 process.env.PATH 不生效，
+ * 必须用绝对路径才能保证找到 ~/.local/bin/ffmpeg。
+ */
+export const FFMPEG_BIN = join(homedir(), '.local', 'bin', 'ffmpeg')
+
+/** ffprobe 与 ffmpeg 同目录，同样必须是绝对路径 */
+export const FFPROBE_BIN = join(homedir(), '.local', 'bin', 'ffprobe')
 
 /**
  * 用 ffmpeg 将音频文件转为指定格式
@@ -10,7 +22,7 @@ export function convertAudio(inputPath: string, outputPath: string, opts: { ar?:
   // 路径校验 + shellQuote 防命令注入
   const safeInput = shellQuote(safeResolvePath(inputPath))
   const safeOutput = shellQuote(outputPath)
-  execSync(`ffmpeg -y -i ${safeInput} -c:a ${codec} -b:a ${bitrate} -ar ${ar} -ac ${ac} ${safeOutput} 2>/dev/null`, { timeout: 30000 })
+  execSync(`${FFMPEG_BIN} -y -i ${safeInput} -c:a ${codec} -b:a ${bitrate} -ar ${ar} -ac ${ac} ${safeOutput} 2>/dev/null`, { timeout: 30000 })
 }
 
 /**
@@ -26,7 +38,8 @@ export function remuxVideoForFeishu(inputPath: string): void {
   // -map 0:v:0 只要第一路视频；无音轨时用 anullsrc 补静音 AAC
   // baseline + level 3.1 兼容飞书/微信内嵌播放
   const cmd = [
-    'ffmpeg -y',
+    FFMPEG_BIN,
+    '-y',
     `-i ${safeInput}`,
     '-f lavfi -i anullsrc=channel_layout=stereo:sample_rate=44100',
     '-filter_complex "[0:v:0]format=yuv420p[v]"',

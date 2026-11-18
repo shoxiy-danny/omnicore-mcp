@@ -9,14 +9,15 @@
  *   GET  {AIPROXY}/v1/media?url=...&as=json   （必要时）
  *
  * 鉴权：aiproxy 用户 token（与 CC providers.json aiproxy.authToken 同源）
- * 默认生图模型：grok-imagine-image-pro（首选）；cheap/quality 可选。
+ * 默认生图模型：grok-imagine-image-2.0（2026-09-04 起）；pro/cheap/quality 仍可显式指定。
  */
 
 import { writeFileSync, mkdirSync, statSync } from 'fs'
 import { join } from 'path'
 import { remuxVideoForFeishu } from '../utils/ffmpeg.js'
 
-const DEFAULT_IMAGE_MODEL = 'grok-imagine-image-pro'
+const DEFAULT_IMAGE_MODEL = 'grok-imagine-image-2.0'
+const PRO_IMAGE_MODEL = 'grok-imagine-image-pro'
 const CHEAP_IMAGE_MODEL = 'grok-imagine-image'
 const QUALITY_IMAGE_MODEL = 'grok-imagine-image-quality'
 const DEFAULT_VIDEO_MODEL = 'grok-imagine-video-1.5'
@@ -63,8 +64,11 @@ async function aiproxyFetch(path: string, init: RequestInit = {}): Promise<Respo
 function resolveImageModel(model?: string): string {
   if (!model) return DEFAULT_IMAGE_MODEL
   const m = model.toLowerCase().trim()
-  if (m === 'pro' || m === 'grok-imagine-image-pro' || m === 'image-pro' || m === 'default') {
+  if (m === '2.0' || m === 'grok-imagine-image-2.0' || m === 'image-2.0' || m === 'image-2' || m === 'default') {
     return DEFAULT_IMAGE_MODEL
+  }
+  if (m === 'pro' || m === 'grok-imagine-image-pro' || m === 'image-pro') {
+    return PRO_IMAGE_MODEL
   }
   if (m === 'quality' || m === 'grok-imagine-image-quality' || m === 'image-quality') {
     return QUALITY_IMAGE_MODEL
@@ -107,7 +111,8 @@ function mapGrokResolution(resolution?: string): string | undefined {
  * 返回 data:image/...;base64,... 供 server 落盘。
  *
  * model:
- *   - grok-imagine-image-pro / pro / default → 首选（默认）
+ *   - grok-imagine-image-2.0 / 2.0 / default → 首选（默认，2026-09-04）
+ *   - grok-imagine-image-pro / pro → 旧 pro
  *   - grok-imagine-image / cheap → 便宜
  *   - grok-imagine-image-quality / quality → 高清
  */

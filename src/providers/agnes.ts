@@ -4,9 +4,11 @@
  * 端点：https://apihub.agnes-ai.com
  *
  * 工具：
- * - image_describe（主路径）：POST /v1/chat/completions（agnes-2.0-flash，多模态识图）
- * - image_gen（主路径）：POST /v1/images/generations（agnes-image-2.1-flash）
- * - video_gen（主路径）：POST /v1/videos → GET /agnesapi?video_id=...（agnes-video-v2.0）
+ * - image_describe（主路径）：POST /v1/chat/completions（agnes-2.5-flash，多模态识图）
+ * - image_gen（主路径）：POST /v1/images/generations（agnes-image-2.5-flash）
+ * - video_gen（主路径）：POST /v1/videos → GET /v1/videos/{id}（agnes-video-2.5-flash）
+ *   2.5 契约：mode=text|reference，size=720P|960P|2K（免费 key 仅 720P），seconds，seed；
+ *   不支持 width/height/num_frames/frame_rate/negative_prompt；首尾帧模式不支持。
  */
 
 import { readFileSync, writeFileSync } from 'fs'
@@ -14,6 +16,8 @@ import { join } from 'path'
 import { safeResolvePath, safeCheckFileSize, isSafeUrl } from '../utils/security.js'
 
 const API_HOST = 'https://apihub.agnes-ai.com'
+const CHAT_MODEL = 'agnes-2.5-flash'
+const IMAGE_MODEL = 'agnes-image-2.5-flash'
 
 /** 懒加载 env：server.ts 的 .env 加载在 ES Module import 之后才执行，必须运行时再读 */
 function getApiKey(): string {
@@ -63,7 +67,7 @@ async function translatePromptToEnglish(prompt: string, key: string): Promise<st
     method: 'POST',
     headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json', connection: 'close' },
     body: JSON.stringify({
-      model: 'agnes-2.0-flash',
+      model: CHAT_MODEL,
       messages: [
         {
           role: 'system',
@@ -128,7 +132,7 @@ export async function agnesDescribeImage(prompt: string, imageSource: string): P
       method: 'POST',
       headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json', connection: 'close' },
       body: JSON.stringify({
-        model: 'agnes-2.0-flash',
+        model: CHAT_MODEL,
         messages: [{
           role: 'user',
           content: [
@@ -180,7 +184,7 @@ export async function agnesGenerateImage(
   return tryWithKeys(async (key) => {
     const finalPrompt = await maybeTranslate({ prompt, no_translate: noTranslate }, key)
     const body: Record<string, unknown> = {
-      model: 'agnes-image-2.1-flash',
+      model: IMAGE_MODEL,
       prompt: finalPrompt,
       size,
       extra_body: { response_format: 'url' },
@@ -207,45 +211,31 @@ export async function agnesGenerateImage(
   })
 }
 
-// ── 视频生成 ──────────────────────────────────────────────────────────────
+// ── 视频生成（agnes-video-2.5-flash）──────────────────────────────────────
 
-/** 帧数计算：duration 秒 × 24fps，取最近的有效值（8n+1，≤ 441，即 ≤18s） */
-function computeNumFrames(duration: number): number {
-  const target = Math.round(duration * 24)
-  const candidates: number[] = []
-  for (let n = 1; ; n++) {
-    const frames = 8 * n + 1
-    if (frames > 441) break  // 24FPS ≤18s
-    candidates.push(frames)
+/** 2.5 模型分辨率映射：720P / 960P / 2K。旧入参 768P 归到 720P，1080P 归到 960P */
+function resolveVideoSize(resolution: string): string {
+  const map: Record<string, string> = {
+    '720P': '720P',
+    '768P': '720P',
+    '960P': '960P',
+    '1080P': '960P',
+    '2K': '2K',
   }
-  // 找最接近 target 的有效帧数
-  const best = candidates.reduce((prev, curr) =>
-    Math.abs(curr - target) < Math.abs(prev - target) ? curr : prev,
-  )
-  return best
-}
-
-/** 分辨率映射 */
-function resolveResolution(resolution: string): { width: number; height: number } {
-  const map: Record<string, { width: number; height: number }> = {
-    '720P':  { width: 1280, height: 720 },
-    '768P':  { width: 1152, height: 768 },
-    '1080P': { width: 1920, height: 1080 },
-  }
-  return map[resolution] || { width: 1152, height: 768 }
+  return map[resolution] || '720P'
 }
 
 export interface AgnesVideoGenOptions {
   prompt: string
   /** 图生视频首帧图片（本地路径或 URL） */
   first_frame_image?: string
-  /** 关键帧模式：尾帧图片（本地路径或 URL）。设置后启用 keyframes 模式 */
+  /** 关键帧模式：尾帧图片。agnes-video-2.5-flash 不支持首尾帧，设置后会报错提示 */
   last_frame_image?: string
-  /** 视频时长（秒），默认 6 */
+  /** 视频时长（秒），默认 5。2.5 模型以 seconds 字段传入 */
   duration?: number
-  /** 分辨率，默认 768P */
+  /** 分辨率：720P/768P→720P，960P/1080P→960P，2K。免费 key 仅支持 720P */
   resolution?: string
-  /** 负向提示词：描述要避免的内容 */
+  /** 负向提示词：agnes-video-2.5-flash 不支持此字段，仅保留兼容会被忽略 */
   negative_prompt?: string
   /** 随机种子：固定值可复现相同结果 */
   seed?: number
@@ -273,16 +263,29 @@ export interface AgnesVideoGenResult {
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
 
-/** 1. 创建视频任务 */
+/** 1. 创建视频任务（2.5 契约：mode=text|reference + size/seconds/seed）。
+ *  免费 key 只允许 720P，遇到 size 受限时自动降到 720P 重试一次。 */
 async function createVideoTask(key: string, body: Record<string, unknown>): Promise<string> {
-  const resp = await fetch(`${API_HOST}/v1/videos`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json', connection: 'close' },
-    body: JSON.stringify(body),
-  })
+  const send = async (b: Record<string, unknown>): Promise<Response> =>
+    fetch(`${API_HOST}/v1/videos`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json', connection: 'close' },
+      body: JSON.stringify(b),
+    })
+
+  let resp = await send(body)
   if (!resp.ok) {
     const errText = await resp.text().catch(() => '')
-    throw new Error(`Agnes 创建视频任务失败: ${resp.status} ${errText.slice(0, 300)}`)
+    if (/size must be/i.test(errText) && body.size !== '720P') {
+      process.stderr.write(`[omnicore] 当前 key 不支持 ${body.size}，自动降为 720P 重试\n`)
+      resp = await send({ ...body, size: '720P' })
+      if (!resp.ok) {
+        const retryErr = await resp.text().catch(() => '')
+        throw new Error(`Agnes 创建视频任务失败: ${resp.status} ${retryErr.slice(0, 300)}`)
+      }
+    } else {
+      throw new Error(`Agnes 创建视频任务失败: ${resp.status} ${errText.slice(0, 300)}`)
+    }
   }
   const data = await resp.json() as any
   const videoId = data.video_id || data.id
@@ -290,14 +293,12 @@ async function createVideoTask(key: string, body: Record<string, unknown>): Prom
   return String(videoId)
 }
 
-/** 2. 查询视频状态 */
+/** 2. 查询视频状态（2.5 契约：GET /v1/videos/{id}，成片地址在 metadata.url） */
 async function queryVideoTask(key: string, videoId: string): Promise<{
   status: string
   download_url?: string
-  width?: number
-  height?: number
 }> {
-  const resp = await fetch(`${API_HOST}/agnesapi?video_id=${encodeURIComponent(videoId)}`, {
+  const resp = await fetch(`${API_HOST}/v1/videos/${encodeURIComponent(videoId)}`, {
     method: 'GET',
     headers: { Authorization: `Bearer ${key}`, connection: 'close' },
   })
@@ -308,9 +309,7 @@ async function queryVideoTask(key: string, videoId: string): Promise<{
   const data = await resp.json() as any
   return {
     status: (data.status || 'unknown') as string,
-    download_url: data.download_url || data.result?.video?.download_url || data.video?.url || data.remixed_from_video_id,
-    width: data.width || data.result?.video?.width,
-    height: data.height || data.result?.video?.height,
+    download_url: data.metadata?.url || data.download_url,
   }
 }
 
@@ -329,7 +328,7 @@ async function uploadImageToHostedUrl(imagePath: string, key: string): Promise<s
 
   const dataUri = resolveImageSource(imagePath)
   const payload = {
-    model: 'agnes-image-2.1-flash',
+    model: IMAGE_MODEL,
     prompt: 'Keep the image exactly as it is',
     n: 1,
     size: '1024x1024',
@@ -365,50 +364,37 @@ export async function agnesVideoGen(opts: AgnesVideoGenOptions): Promise<AgnesVi
   return tryWithKeys(async (key) => {
     const startedAt = Date.now()
     const duration = opts.duration ?? 5
-    const resolution = opts.resolution ?? '768P'
+    const resolution = opts.resolution ?? '720P'
     const outputDir = opts.output_dir ?? './output'
     const pollIntervalMs = opts.poll_interval_ms ?? 15_000
     const timeoutMs = opts.timeout_ms ?? 10 * 60_000
 
-    const { width, height } = resolveResolution(resolution)
-    const numFrames = computeNumFrames(duration)
+    const size = resolveVideoSize(resolution)
+
+    if (opts.negative_prompt) {
+      process.stderr.write('[omnicore] agnes-video-2.5-flash 不支持 negative_prompt，已忽略\n')
+    }
 
     const finalPrompt = await maybeTranslate({ prompt: opts.prompt, no_translate: opts.no_translate }, key)
 
     const body: Record<string, unknown> = {
-      model: 'agnes-video-v2.0',
+      model: 'agnes-video-2.5-flash',
       prompt: finalPrompt,
-      width,
-      height,
-      num_frames: numFrames,
-      frame_rate: 24,
+      mode: 'text',
+      size,
+      seconds: String(duration),
     }
 
     if (opts.first_frame_image) {
-      // 按官方文档 V2.0：单图 I2V 用 image 字段（传 URL）。
-      // 本地文件先上传到 Agnes 图床获得托管 URL；URL 直传。上传失败回退 base64 data URI。
+      // 2.5 契约：图生视频用 mode=reference + images:[URL]。本地文件先上传到 Agnes 图床。
       const imgPath = opts.first_frame_image
       const isLocal = !imgPath.startsWith('http://') && !imgPath.startsWith('https://') && !imgPath.startsWith('data:')
       const hostedUrl = isLocal ? await uploadImageToHostedUrl(imgPath, key) : null
-      body.image = hostedUrl || resolveImageSource(imgPath)
+      body.mode = 'reference'
+      body.images = [hostedUrl || resolveImageSource(imgPath)]
     }
     if (opts.last_frame_image) {
-      // 关键帧模式：extra_body.image = [首帧URL, 尾帧URL]，extra_body.mode = "keyframes"
-      const firstPath = opts.first_frame_image
-      const firstIsLocal = firstPath && !firstPath.startsWith('http://') && !firstPath.startsWith('https://') && !firstPath.startsWith('data:')
-      const firstHosted = firstIsLocal ? await uploadImageToHostedUrl(firstPath!, key) : null
-      const firstUrl = firstHosted || (firstPath ? resolveImageSource(firstPath) : null)
-      if (!firstUrl) {
-        throw new Error('关键帧模式需要 first_frame_image')
-      }
-      const lastPath = opts.last_frame_image
-      const lastIsLocal = !lastPath.startsWith('http://') && !lastPath.startsWith('https://') && !lastPath.startsWith('data:')
-      const lastHosted = lastIsLocal ? await uploadImageToHostedUrl(lastPath, key) : null
-      const lastUrl = lastHosted || resolveImageSource(lastPath)
-      body.extra_body = { image: [firstUrl, lastUrl], mode: 'keyframes' }
-    }
-    if (opts.negative_prompt) {
-      body.negative_prompt = opts.negative_prompt
+      throw new Error('agnes-video-2.5-flash 暂不支持首尾帧（last_frame_image），请只用 first_frame_image 或换 provider=minimax')
     }
     if (opts.seed !== undefined) {
       body.seed = opts.seed
@@ -416,14 +402,12 @@ export async function agnesVideoGen(opts: AgnesVideoGenOptions): Promise<AgnesVi
 
     // 1. 创建任务
     const videoId = await createVideoTask(key, body)
-    process.stderr.write(`[omnicore:video_gen] Agnes task created: video_id=${videoId}, model=agnes-video-v2.0, duration=${duration}s\n`)
+    process.stderr.write(`[omnicore:video_gen] Agnes task created: video_id=${videoId}, model=agnes-video-2.5-flash, size=${size}, duration=${duration}s\n`)
 
   // 2. 轮询
   const deadline = startedAt + timeoutMs
   let lastStatus = 'queued'
   let downloadUrl: string | undefined
-  let videoWidth = 0
-  let videoHeight = 0
 
   while (Date.now() < deadline) {
     await sleep(pollIntervalMs)
@@ -434,8 +418,6 @@ export async function agnesVideoGen(opts: AgnesVideoGenOptions): Promise<AgnesVi
 
     if (q.status === 'completed') {
       downloadUrl = q.download_url
-      videoWidth = q.width || 0
-      videoHeight = q.height || 0
       break
     }
 
@@ -461,11 +443,11 @@ export async function agnesVideoGen(opts: AgnesVideoGenOptions): Promise<AgnesVi
     task_id: videoId,
     file_path: filePath,
     file_bytes: buf.byteLength,
-    model: 'agnes-video-v2.0',
+    model: 'agnes-video-2.5-flash',
     duration,
-    resolution,
-    video_width: videoWidth,
-    video_height: videoHeight,
+    resolution: size,
+    video_width: 0,
+    video_height: 0,
     elapsed_ms: Date.now() - startedAt,
   }
   })

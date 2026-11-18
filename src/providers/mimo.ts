@@ -46,7 +46,9 @@ export async function mimoTts(
     ? [{ role: 'user', content: voice }, { role: 'assistant', content: text }]
     : [{ role: 'assistant', content: text }]
   const audio: Record<string, unknown> = { format }
-  if (model !== 'voicedesign') audio.voice = voice
+  // voice 为空就不传这个字段，让 MiMo 用自己的默认音色。
+  // 以前无条件塞，等于把「默认」硬绑成一个具体音色。
+  if (model !== 'voicedesign' && voice && voice.trim()) audio.voice = voice
 
   const resp = await fetch(`${MIMO_API_HOST}/v1/chat/completions`, {
     method: 'POST',
